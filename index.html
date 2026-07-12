@@ -694,14 +694,23 @@ function toggleSidebar(){
 ========================================================= */
 const ALL_KEYS = Object.keys(MODULES).concat(['tasks']);
 
+function withTimeout(promise, ms=8000){
+  return Promise.race([
+    promise,
+    new Promise((_,reject)=>setTimeout(()=>reject(new Error('timeout: no response after '+ms+'ms')), ms))
+  ]);
+}
+
 // Storage priority: Firebase (if configured) -> Claude.ai window.storage (if running as an
 // artifact) -> browser localStorage (fallback so the app still works standalone).
+// Every Firestore call is wrapped with a timeout so the app can never hang forever
+// waiting on a stuck network/browser connection.
 async function storageGet(key){
   if(FIREBASE_ENABLED && fbDb && currentUser){
     try{
-      const snap = await fbDb.collection('users').doc(currentUser.uid).collection('records').doc(key).get();
+      const snap = await withTimeout(fbDb.collection('users').doc(currentUser.uid).collection('records').doc(key).get());
       return snap.exists ? {value:snap.data().value} : null;
-    }catch(e){ console.error(e); return null; }
+    }catch(e){ console.error('storageGet failed for',key,e); return null; }
   }
   if(HAS_CLAUDE_STORAGE){
     try{ return await window.storage.get(key, SHARED); }catch(e){ return null; }
@@ -714,9 +723,9 @@ async function storageGet(key){
 async function storageSet(key,value){
   if(FIREBASE_ENABLED && fbDb && currentUser){
     try{
-      await fbDb.collection('users').doc(currentUser.uid).collection('records').doc(key).set({value, updatedAt:Date.now()});
+      await withTimeout(fbDb.collection('users').doc(currentUser.uid).collection('records').doc(key).set({value, updatedAt:Date.now()}));
       return {value};
-    }catch(e){ console.error(e); toast('تعذر الحفظ على Firebase'); return null; }
+    }catch(e){ console.error('storageSet failed for',key,e); toast('تعذر الحفظ على Firebase'); return null; }
   }
   if(HAS_CLAUDE_STORAGE){
     try{ return await window.storage.set(key, value, SHARED); }catch(e){ return null; }
@@ -1491,7 +1500,7 @@ function skipWelcome(){
 ========================================================= */
 async function startApp(){
   await loadAll();
-  for(const k of ALL_KEYS) await persist(k); // ensure seed data is saved on first run
+  await Promise.all(ALL_KEYS.map(k=>persist(k))); // ensure seed data is saved on first run (parallel, bounded by per-call timeout)
   document.getElementById('loadingScreen').style.display='none';
   document.getElementById('todayPill').textContent = 'اليوم: '+new Date().toLocaleDateString('ar-SA-u-nu-latn',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
   renderSidebarUser();
@@ -1503,7 +1512,22 @@ async function startApp(){
 async function init(){
   buildNav();
   if(FIREBASE_ENABLED){
-    initFirebase(); // will call startApp() once signed in
+    try{
+      if(typeof firebase === 'undefined') throw new Error('Firebase SDK not loaded (likely opened from a local file, not a hosted https:// link)');
+      initFirebase(); // will call startApp() once signed in
+      // safety net: if Firebase never responds within 6s (blocked script, offline, etc.), fall back
+      setTimeout(()=>{
+        if(document.getElementById('loadingScreen').style.display!=='none' && document.getElementById('loginScreen').style.display!=='flex'){
+          console.warn('Firebase timed out — falling back to local storage mode');
+          toast('تعذر الاتصال بـ Firebase، يعمل الموقع محلياً مؤقتاً');
+          startApp();
+        }
+      },6000);
+    }catch(err){
+      console.error(err);
+      toast('تعذر تحميل Firebase — يعمل الموقع محلياً. ارفعه على رابط https:// ليعمل تسجيل الدخول.');
+      await startApp();
+    }
   }else{
     await startApp();
   }
