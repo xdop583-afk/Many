@@ -1427,6 +1427,12 @@ function initFirebase(){
   fbApp = firebase.initializeApp(FIREBASE_CONFIG);
   fbAuth = firebase.auth();
   fbDb = firebase.firestore();
+  // Some mobile networks / proxies / firewalls block Firestore's default streaming
+  // connection while allowing Auth through fine. Auto-detecting long-polling fixes
+  // that class of "hangs forever with no error" connectivity issues.
+  try{
+    fbDb.settings({ experimentalAutoDetectLongPolling: true, useFetchStreams: false });
+  }catch(e){ console.warn('firestore settings could not be applied', e); }
   setDebug('بانتظار حالة تسجيل الدخول...');
 
   document.getElementById('loginForm').addEventListener('submit', async e=>{
