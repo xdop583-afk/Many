@@ -266,6 +266,7 @@
 <div class="loading-screen" id="loadingScreen">
   <div class="spin"></div>
   <div style="color:var(--text-muted);font-size:13px;">جاري تحميل بيانات الفروع...</div>
+  <div id="debugStatus" style="color:var(--text-muted);font-size:11px;opacity:.7;max-width:280px;text-align:center;"></div>
 </div>
 
 <div class="login-screen" id="loginScreen" style="display:none;">
@@ -678,11 +679,11 @@ function badgeFor(mapKey,value){
   const cls=(BADGE_MAPS[mapKey]&&BADGE_MAPS[mapKey][value])||'muted';
   return badge(value,cls);
 }
-function toast(msg){
+function toast(msg,duration=5000){
   const t=document.getElementById('toast');
   t.textContent=msg;t.classList.add('show');
   clearTimeout(window.__toastTimer);
-  window.__toastTimer=setTimeout(()=>t.classList.remove('show'),2200);
+  window.__toastTimer=setTimeout(()=>t.classList.remove('show'),duration);
 }
 function toggleSidebar(){
   sidebarOpen=!sidebarOpen;
@@ -710,7 +711,12 @@ async function storageGet(key){
     try{
       const snap = await withTimeout(fbDb.collection('users').doc(currentUser.uid).collection('records').doc(key).get());
       return snap.exists ? {value:snap.data().value} : null;
-    }catch(e){ console.error('storageGet failed for',key,e); return null; }
+    }catch(e){
+      console.error('storageGet failed for',key,e);
+      const code = e && e.code ? e.code : (e && e.message ? e.message : 'unknown');
+      setDebug('خطأ قراءة ('+key+'): '+code);
+      return null;
+    }
   }
   if(HAS_CLAUDE_STORAGE){
     try{ return await window.storage.get(key, SHARED); }catch(e){ return null; }
@@ -725,7 +731,13 @@ async function storageSet(key,value){
     try{
       await withTimeout(fbDb.collection('users').doc(currentUser.uid).collection('records').doc(key).set({value, updatedAt:Date.now()}));
       return {value};
-    }catch(e){ console.error('storageSet failed for',key,e); toast('تعذر الحفظ على Firebase'); return null; }
+    }catch(e){
+      console.error('storageSet failed for',key,e);
+      const code = e && e.code ? e.code : (e && e.message ? e.message : 'unknown');
+      toast('تعذر الحفظ: '+code);
+      setDebug('خطأ حفظ: '+code);
+      return null;
+    }
   }
   if(HAS_CLAUDE_STORAGE){
     try{ return await window.storage.set(key, value, SHARED); }catch(e){ return null; }
@@ -734,6 +746,7 @@ async function storageSet(key,value){
 }
 
 async function loadAll(){
+  setDebug('جاري تحميل '+ALL_KEYS.length+' قسم بيانات...');
   await Promise.all(ALL_KEYS.map(async k=>{
     try{
       const res = await storageGet('coffee-ops:'+k);
@@ -742,6 +755,7 @@ async function loadAll(){
       state[k] = [];
     }
   }));
+  setDebug('تم تحميل البيانات، جاري التجهيز...');
   seedIfEmpty();
 }
 
@@ -1402,10 +1416,18 @@ function setBadge(key,n){
 /* =========================================================
    FIREBASE AUTH
 ========================================================= */
+function setDebug(msg){
+  const el=document.getElementById('debugStatus');
+  if(el) el.textContent=msg;
+  console.log('[coffee-ops]',msg);
+}
+
 function initFirebase(){
+  setDebug('جاري الاتصال بـ Firebase...');
   fbApp = firebase.initializeApp(FIREBASE_CONFIG);
   fbAuth = firebase.auth();
   fbDb = firebase.firestore();
+  setDebug('بانتظار حالة تسجيل الدخول...');
 
   document.getElementById('loginForm').addEventListener('submit', async e=>{
     e.preventDefault();
@@ -1419,7 +1441,7 @@ function initFirebase(){
     try{
       await fbAuth.signInWithEmailAndPassword(email, pass);
     }catch(err){
-      errBox.textContent = 'تعذر تسجيل الدخول: تحقق من البريد وكلمة المرور';
+      errBox.textContent = 'تعذر تسجيل الدخول: '+(err && err.message ? err.message : 'تحقق من البريد وكلمة المرور');
       errBox.classList.add('show');
     }
     btn.textContent='دخول';
@@ -1429,6 +1451,7 @@ function initFirebase(){
   fbAuth.onAuthStateChanged(async user=>{
     if(user){
       currentUser=user;
+      setDebug('تم تسجيل الدخول، جاري تحميل البيانات...');
       document.getElementById('loginScreen').style.display='none';
       document.getElementById('loadingScreen').style.display='flex';
       await startApp();
@@ -1509,23 +1532,46 @@ async function startApp(){
   showWelcomeScreen();
 }
 
+function waitForFirebaseSDK(maxWaitMs=10000, intervalMs=250){
+  return new Promise(resolve=>{
+    if(typeof firebase !== 'undefined') return resolve(true);
+    let waited=0;
+    const timer=setInterval(()=>{
+      waited+=intervalMs;
+      if(typeof firebase !== 'undefined'){
+        clearInterval(timer);
+        resolve(true);
+      }else if(waited>=maxWaitMs){
+        clearInterval(timer);
+        resolve(false);
+      }else{
+        setDebug('جاري تحميل مكتبة Firebase... ('+Math.round(waited/1000)+'ث)');
+      }
+    }, intervalMs);
+  });
+}
+
 async function init(){
   buildNav();
+  setDebug('جاري بدء التطبيق...');
   if(FIREBASE_ENABLED){
     try{
-      if(typeof firebase === 'undefined') throw new Error('Firebase SDK not loaded (likely opened from a local file, not a hosted https:// link)');
+      const loaded = await waitForFirebaseSDK();
+      if(!loaded) throw new Error('تعذّر تحميل مكتبة Firebase من الإنترنت بعد عدة محاولات — تحقق من اتصالك أو جرّب شبكة أخرى');
       initFirebase(); // will call startApp() once signed in
-      // safety net: if Firebase never responds within 6s (blocked script, offline, etc.), fall back
+      // safety net: if Firebase never responds within 8s (blocked script, offline, unauthorized domain, etc.), fall back
       setTimeout(()=>{
         if(document.getElementById('loadingScreen').style.display!=='none' && document.getElementById('loginScreen').style.display!=='flex'){
+          setDebug('انتهت مهلة الاتصال بـ Firebase — تحقق من Authorized domains في Authentication، أو من اتصال الإنترنت. جاري التحول لوضع محلي مؤقت...');
           console.warn('Firebase timed out — falling back to local storage mode');
           toast('تعذر الاتصال بـ Firebase، يعمل الموقع محلياً مؤقتاً');
           startApp();
         }
-      },6000);
+      },8000);
     }catch(err){
       console.error(err);
-      toast('تعذر تحميل Firebase — يعمل الموقع محلياً. ارفعه على رابط https:// ليعمل تسجيل الدخول.');
+      setDebug('خطأ: '+(err && err.message ? err.message : err));
+      toast('تعذر تحميل Firebase — يعمل الموقع محلياً.');
       await startApp();
     }
   }else{
